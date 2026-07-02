@@ -17,9 +17,13 @@ def score_document(predictions: Sequence[dict], gold: Sequence[dict]) -> Tuple[i
     equal (string equality on both fields). Each gold entity matches at most
     one prediction; each prediction matches at most one gold entity.
     """
-    # TODO: implement per the methodology. Use string equality, not normalized
-    # comparison -- the M6 NER pipeline already trims entity text.
-    raise NotImplementedError
+    gold_set = {(e["entity_text"], e["entity_label"]) for e in gold}
+    pred_set = {(e["entity_text"], e["entity_label"]) for e in predictions}
+    
+    tp = len(pred_set & gold_set)
+    fp = len(pred_set - gold_set)
+    fn = len(gold_set - pred_set)
+    return tp, fp, fn
 
 
 def compute_micro_f1(
@@ -34,5 +38,19 @@ def compute_micro_f1(
       - If TP + FN == 0, recall is 0.0.
       - If both numerators are 0, F1 is 0.0 (not NaN).
     """
-    # TODO: implement per the methodology.
-    raise NotImplementedError
+    total_tp = 0
+    total_fp = 0
+    total_fn = 0
+    
+    for doc_id, gold_entities in gold_by_doc.items():
+        pred_entities = predictions_by_doc.get(doc_id, [])
+        tp, fp, fn = score_document(pred_entities, gold_entities)
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+        
+    precision = 0.0 if (total_tp + total_fp) == 0 else total_tp / (total_tp + total_fp)
+    recall = 0.0 if (total_tp + total_fn) == 0 else total_tp / (total_tp + total_fn)
+    f1 = 0.0 if (precision + recall) == 0 else (2 * precision * recall) / (precision + recall)
+    
+    return precision, recall, f1

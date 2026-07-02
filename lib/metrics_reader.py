@@ -122,3 +122,9 @@ def get_p95_latency(path: str, body: Optional[str] = None) -> float:
         prev_ub = ub
         prev_count = cum
     return prev_ub
+
+
+
+def get_total_requests(path: str, body: Optional[str] = None) -> float:
+    """Alias for get_request_count to satisfy eval_runner.py expectations."""
+    return get_request_count(path, body=body)

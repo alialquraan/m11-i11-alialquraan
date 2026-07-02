@@ -40,13 +40,76 @@ def load_fixture():
 
 def run() -> Tuple[float, list]:
     """Run the harness end-to-end. Returns (exact_match_rate, per_question_results)."""
-    # TODO: implement per the methodology.
-    # Steps:
-    #   1. Load the fixture.
-    #   2. For each question, POST /kg/query with {"question": q}.
-    #   3. If the response is 422 with UnsupportedQueryError, mark the question
-    #      "excluded" -- do not count it in the denominator.
-    #   4. Otherwise, read the returned cypher field, normalize both predicted
-    #      and gold via lib.cypher_normalizer.normalize_cypher, compare.
-    #   5. Aggregate exact-match rate = matched / (total - excluded).
-    raise NotImplementedError
+    # 1. Load the fixture.
+    questions_data = load_fixture()
+    
+    per_question_results = []
+    matched_count = 0
+    supported_count = 0
+    
+    for item in questions_data:
+        q_id = item["question_id"]
+        question = item["question"]
+        gold_cypher = item["gold_cypher"]
+        
+        result_entry = {
+            "question_id": q_id,
+            "question": question,
+            "status": "success",
+            "matched": False,
+            "excluded": False
+        }
+        
+        try:
+            # 2. الاستدعاء المباشر عبر httpx.post
+            url = f"{API_URL.rstrip('/')}/kg/query"
+            response = httpx.post(url, json={"question": question})
+            
+            # 3. If the response is 422 with UnsupportedQueryError, mark the question "excluded"
+            if response.status_code == 422:
+                response_json = response.json()
+                error_detail = response_json.get("detail", "") or response_json.get("error", "")
+                if "UnsupportedQueryError" in str(error_detail):
+                    result_entry["excluded"] = True
+                    result_entry["status"] = "excluded"
+                    per_question_results.append(result_entry)
+                    continue
+            
+            # 5xx. Score 0 (the harness counts it as an answered failure)
+            if response.status_code >= 500:
+                result_entry["status"] = "failed"
+                result_entry["error"] = f"HTTP {response.status_code}: {response.text}"
+                supported_count += 1
+                per_question_results.append(result_entry)
+                continue
+            
+            response.raise_for_status()
+            
+            # 4. Otherwise, read the returned cypher field, normalize and compare.
+            pred_json = response.json()
+            pred_cypher = pred_json.get("cypher", "")
+            
+            norm_pred = normalize_cypher(pred_cypher)
+            norm_gold = normalize_cypher(gold_cypher)
+            
+            supported_count += 1
+            if norm_pred == norm_gold:
+                matched_count += 1
+                result_entry["matched"] = True
+            else:
+                result_entry["matched"] = False
+                
+            per_question_results.append(result_entry)
+            
+        except Exception as e:
+            result_entry["status"] = "failed"
+            result_entry["error"] = str(e)
+            supported_count += 1
+            per_question_results.append(result_entry)
+
+    # 5. Aggregate exact-match rate = matched / (total - excluded) -> matched / supported_count
+    exact_match_rate = 0.0
+    if supported_count > 0:
+        exact_match_rate = matched_count / supported_count
+        
+    return exact_match_rate, per_question_results

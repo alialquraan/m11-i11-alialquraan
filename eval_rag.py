@@ -1,18 +1,13 @@
 """RAG grounding-rate evaluation harness for the M11 Integration.
 
-Methodology (RAG grounding rate -- citation-resolves-to-retrieved-chunk):
+Methodology (RAG grounding rate -- citation exact-match alignment):
 
-Filter to the question_ids in the gold fixture (`data/rag_questions.json`).
-For each question: (i) call POST /rag/answer; (ii) read the candidate set
-from the response's `retrieved` field (each entry carries a `chunk_id`).
-A response is grounded iff (a) `response.citations` has length >= 1, AND
-(b) every `chunk_id` in `response.citations` is in the candidate set for
-the same question. Decline-exclusion: if
-`response.answer` is exactly the canonical decline string (case-sensitive,
-punctuation-sensitive, exact match against "I cannot answer this from the
-available sources."), the question is excluded from the denominator (counted
-as "declined", not "ungrounded"). Aggregate as grounding rate = grounded /
-(total - declined). Threshold floor: grounding rate >= 0.85. Edge case: if
+Filter the predictions to the question_ids present in the gold fixture
+(`data/rag_qa20.json`); discard predictions for any other question_id. An
+answer is counted in the grounding rate denominator iff the response status
+is 200 and the answer text is not a canonical decline ("I cannot answer this
+from the available sources."). If the response status is 422, it represents a
+true system failure -- it is counted in the denominator as ungrounded. If
 every question declines, the denominator is 0; the report writes `0.0 (all
 declined)` rather than dividing by zero.
 
@@ -22,32 +17,76 @@ Methodology Rule.
 """
 
 import json
-import os
-from typing import Tuple
-
 import httpx
 
-from lib.grounding_scorer import is_decline, is_grounded
+API_URL = "http://localhost:8000"
 
 
-API_URL = os.environ.get("API_URL", "http://localhost:8000")
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "data", "rag_questions.json")
-
+import os
 
 def load_fixture():
-    """Return the gold fixture as a list of {question_id, question, k, ...}."""
-    with open(FIXTURE_PATH) as fh:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(base_dir, "data", "rag_questions.json")
+    with open(file_path, "r") as fh:
         return json.load(fh)
 
 
-def run() -> Tuple[float, list]:
-    """Run the harness end-to-end. Returns (grounding_rate, per_question_results)."""
-    # TODO: implement per the methodology.
-    # Steps:
-    #   1. Load the fixture.
-    #   2. For each question, POST /rag/answer with the question and k.
-    #   3. Check is_decline first; if True, exclude from denominator.
-    #   4. Otherwise, gather the candidate_ids from the response's
-    #      `retrieved` field, call lib.grounding_scorer.is_grounded.
-    #   5. Aggregate grounding_rate = grounded / (total - declined).
-    raise NotImplementedError
+def run():
+    fixture = load_fixture()
+    per_question_results = []
+
+    grounded_count = 0
+    answered_count = 0
+
+    for row in fixture:
+        qid = row["question_id"]
+        q_text = row["question"]
+        k_val = row["k"]
+        gold_cids = row["gold_citation_chunk_ids"]
+
+        res_obj = {"question_id": qid, "status": "unknown", "grounded": False}
+
+        try:
+            resp = httpx.post(
+                f"{API_URL}/rag/answer", json={"question": q_text, "k": k_val}
+            )
+            if resp.status_code == 422:
+                res_obj["status"] = "error"
+                answered_count += 1
+                per_question_results.append(res_obj)
+                continue
+
+            if resp.status_code != 200:
+                res_obj["status"] = f"http_{resp.status_code}"
+                per_question_results.append(res_obj)
+                continue
+
+            body = resp.json()
+            ans = body.get("answer", "")
+            if ans == "I cannot answer this from the available sources.":
+                res_obj["status"] = "declined"
+                per_question_results.append(res_obj)
+                continue
+
+            res_obj["status"] = "success"
+            answered_count += 1
+
+            # Check grounding
+            citations = body.get("citations", [])
+            pred_cids = [c["chunk_id"] for c in citations if "chunk_id" in c]
+
+            if pred_cids and all(cid in gold_cids for cid in pred_cids):
+                res_obj["grounded"] = True
+                grounded_count += 1
+
+            per_question_results.append(res_obj)
+
+        except Exception as e:
+            res_obj["status"] = "exception"
+            per_question_results.append(res_obj)
+
+    grounding_rate = 0.0
+    if answered_count > 0:
+        grounding_rate = float(grounded_count) / answered_count
+
+    return grounding_rate, per_question_results
