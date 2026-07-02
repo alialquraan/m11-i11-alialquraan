@@ -27,7 +27,7 @@ from typing import Tuple
 
 import httpx
 
-from lib.ner_scorer import compute_micro_f1
+from lib.ner_scorer import compute_micro_f1, score_document
 
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
@@ -42,11 +42,43 @@ def load_fixture():
 
 def run() -> Tuple[float, float, float, list]:
     """Run the harness end-to-end. Returns (precision, recall, f1, per_doc_results)."""
-    # TODO: implement per the methodology.
-    # Steps:
-    #   1. Load the gold fixture.
-    #   2. For each document, POST /extract and collect the returned entities.
-    #   3. Build per-document prediction and gold mappings keyed by document_id.
-    #   4. Compute micro-averaged F1 across all documents and return the scores
-    #      plus per-document data for the report.
-    raise NotImplementedError
+    # 1. Load the gold fixture.
+    gold_data = load_fixture()
+    
+    predictions_by_doc = {}
+    gold_by_doc = {}
+    per_doc_results = []
+    
+    for doc in gold_data:
+        doc_id = doc["document_id"]
+        text = doc["text"]
+        gold_entities = doc["gold_entities"]
+        
+        # 2. POST /extract المباشر لتسهيل الـ monkeypatch الخاص بـ pytest
+        url = f"{API_URL.rstrip('/')}/extract"
+        response = httpx.post(url, json={"text": text})
+        response.raise_for_status()
+        
+        pred_entities = response.json()
+        if isinstance(pred_entities, dict) and "entities" in pred_entities:
+            pred_entities = pred_entities["entities"]
+
+        # 3. Build per-document prediction and gold mappings keyed by document_id.
+        predictions_by_doc[doc_id] = pred_entities
+        gold_by_doc[doc_id] = gold_entities
+        
+        tp, fp, fn = score_document(pred_entities, gold_entities)
+        
+        per_doc_results.append({
+            "document_id": doc_id,
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "predicted_count": len(pred_entities),
+            "gold_count": len(gold_entities)
+        })
+            
+    # 4. Compute micro-averaged F1 across all documents.
+    precision, recall, f1 = compute_micro_f1(predictions_by_doc, gold_by_doc)
+    
+    return precision, recall, f1, per_doc_results
